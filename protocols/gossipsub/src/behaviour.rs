@@ -2247,8 +2247,12 @@ where
 
     /// Applies penalties to peers that did not respond to our IWANT requests.
     fn apply_iwant_penalties(&mut self) {
+        // Always prune expired promises so GossipPromises.promises doesn't grow unbounded,
+        // regardless of whether peer scoring is active. Only apply scoring penalties when
+        // scoring is enabled (original behavior).
+        let broken_promises = self.gossip_promises.get_broken_promises();
         if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
-            for (peer, count) in self.gossip_promises.get_broken_promises() {
+            for (peer, count) in broken_promises {
                 peer_score.add_penalty(&peer, count);
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = self.metrics.as_mut() {

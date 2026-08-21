@@ -342,6 +342,51 @@ impl Config {
         self.set(|cfg| cfg.set_window_update_mode(mode.0))
     }
 
+    /// Sets the maximum number of concurrent substreams, keeping the
+    /// connection on the yamux 0.13 code path.
+    ///
+    /// [`Config::set_max_num_streams`] routes through [`Config::set`], which
+    /// converts the config to its yamux 0.12 variant. yamux 0.12 is affected
+    /// by GHSA-vxx9-2994-q338 (remote panic on a malformed Data frame with
+    /// SYN set and `len = 262145`) and the 0.12 line has no patched release —
+    /// the advisory's fixed version is 0.13.10. Callers that need a stream
+    /// cap therefore had to choose between bounding resources and staying on
+    /// a patched multiplexer. This setter removes that trade-off.
+    pub fn set_max_num_streams_013(&mut self, num_streams: usize) -> &mut Self {
+        self.set_013(|cfg| cfg.set_max_num_streams(num_streams))
+    }
+
+    /// Sets the upper limit for the total receive window across all substreams
+    /// of a connection, keeping the connection on the yamux 0.13 code path.
+    ///
+    /// This is the 0.13 replacement for the per-substream
+    /// [`Config::set_max_buffer_size`], and is a strictly tighter bound: it
+    /// caps a whole connection rather than each stream individually.
+    ///
+    /// Must be `>= 256 KiB * max_num_streams`, so call
+    /// [`Config::set_max_num_streams_013`] first when lowering both.
+    pub fn set_max_connection_receive_window_013(&mut self, num_bytes: Option<usize>) -> &mut Self {
+        self.set_013(|cfg| cfg.set_max_connection_receive_window(num_bytes))
+    }
+
+    /// Mirror of [`Config::set`] for the yamux 0.13 variant.
+    ///
+    /// Converts to the 0.13 config if the caller had previously selected the
+    /// 0.12 one, so the resulting connection always uses yamux 0.13.
+    fn set_013(&mut self, f: impl FnOnce(&mut yamux013::Config) -> &mut yamux013::Config) -> &mut Self {
+        let cfg013 = match self.0.as_mut() {
+            Either::Right(c) => &mut c.0,
+            Either::Left(_) => {
+                self.0 = Either::Right(Config013::default());
+                &mut self.0.as_mut().unwrap_right().0
+            }
+        };
+
+        f(cfg013);
+
+        self
+    }
+
     fn set(&mut self, f: impl FnOnce(&mut yamux012::Config) -> &mut yamux012::Config) -> &mut Self {
         let cfg012 = match self.0.as_mut() {
             Either::Left(c) => &mut c.inner,

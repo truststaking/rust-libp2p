@@ -302,6 +302,26 @@ impl<TBehaviourOutEvent> SwarmEvent<TBehaviourOutEvent> {
     }
 }
 
+/// Lifecycle observation for one outgoing connection attempt.
+#[derive(Debug)]
+pub enum DialObservation<'a> {
+    /// The dial was admitted to the connection pool.
+    Started,
+    /// The swarm rejected the request before admitting it to the pool.
+    Rejected(&'a DialError),
+    /// The outgoing connection was established.
+    Established,
+    /// An admitted attempt failed before becoming an established connection.
+    Failed(&'a DialError),
+}
+
+type DialCallback = dyn Fn(&'static str, DialObservation<'_>) + Send + Sync;
+
+struct DialObserver {
+    callback: Box<DialCallback>,
+    pending: HashMap<ConnectionId, &'static str>,
+}
+
 /// Contains the state of the network, plus the way it should behave.
 ///
 /// Note: Needs to be polled via `<Swarm as Stream>` in order to make
@@ -337,6 +357,7 @@ where
     pending_handler_event: Option<(PeerId, PendingNotifyHandler, THandlerInEvent<TBehaviour>)>,
 
     pending_swarm_events: VecDeque<SwarmEvent<TBehaviour::ToSwarm>>,
+    dial_observer: Option<DialObserver>,
 }
 
 impl<TBehaviour> Unpin for Swarm<TBehaviour> where TBehaviour: NetworkBehaviour {}
@@ -365,6 +386,30 @@ where
             listened_addrs: HashMap::new(),
             pending_handler_event: None,
             pending_swarm_events: VecDeque::default(),
+            dial_observer: None,
+        }
+    }
+
+    /// Observe outgoing dials initiated after installing this callback.
+    ///
+    /// Install before dialing. The callback runs synchronously on the swarm task.
+    /// Dropping the swarm discards unfinished observations.
+    pub fn with_dial_observer(
+        mut self,
+        callback: impl Fn(&'static str, DialObservation<'_>) + Send + Sync + 'static,
+    ) -> Self {
+        self.dial_observer = Some(DialObserver {
+            callback: Box::new(callback),
+            pending: HashMap::new(),
+        });
+        self
+    }
+
+    fn finish_dial(&mut self, id: ConnectionId, observation: DialObservation<'_>) {
+        if let Some(observer) = &mut self.dial_observer
+            && let Some(source) = observer.pending.remove(&id)
+        {
+            (observer.callback)(source, observation);
         }
     }
 
@@ -426,8 +471,23 @@ where
     /// # }
     /// ```
     pub fn dial(&mut self, opts: impl Into<DialOpts>) -> Result<(), DialError> {
-        let dial_opts = opts.into();
+        let opts = opts.into();
+        let id = opts.connection_id();
+        let source = opts.source;
+        let result = self.start_dial(opts);
+        if let Some(observer) = &mut self.dial_observer {
+            match &result {
+                Ok(()) => {
+                    observer.pending.insert(id, source);
+                    (observer.callback)(source, DialObservation::Started);
+                }
+                Err(error) => (observer.callback)(source, DialObservation::Rejected(error)),
+            }
+        }
+        result
+    }
 
+    fn start_dial(&mut self, dial_opts: DialOpts) -> Result<(), DialError> {
         let peer_id = dial_opts.get_peer_id();
         let condition = dial_opts.peer_condition();
         let connection_id = dial_opts.connection_id();
@@ -706,6 +766,7 @@ where
                             Ok(handler) => handler,
                             Err(cause) => {
                                 let dial_error = DialError::Denied { cause };
+                                self.finish_dial(id, DialObservation::Failed(&dial_error));
                                 self.behaviour.on_swarm_event(FromSwarm::DialFailure(
                                     DialFailure {
                                         connection_id: id,
@@ -780,6 +841,9 @@ where
 
                 self.pool
                     .spawn_connection(id, peer_id, &endpoint, connection, handler);
+                if endpoint.is_dialer() {
+                    self.finish_dial(id, DialObservation::Established);
+                }
 
                 tracing::debug!(
                     peer=%peer_id,
@@ -823,6 +887,7 @@ where
                 peer,
             } => {
                 let error = error.into();
+                self.finish_dial(connection_id, DialObservation::Failed(&error));
 
                 self.behaviour
                     .on_swarm_event(FromSwarm::DialFailure(DialFailure {
@@ -2309,7 +2374,20 @@ mod tests {
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .try_init();
 
-        let mut dialer = new_test_swarm(Config::with_tokio_executor());
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let mut dialer = new_test_swarm(Config::with_tokio_executor()).with_dial_observer(
+            move |source, outcome| {
+                let outcome = match outcome {
+                    DialObservation::Started => "started",
+                    DialObservation::Rejected(DialError::DialPeerConditionFalse(_)) => "busy",
+                    DialObservation::Failed(DialError::Aborted) => "aborted",
+                    DialObservation::Established => "established",
+                    other => panic!("unexpected dial observation: {other:?}"),
+                };
+                observed.lock().unwrap().push((source, outcome));
+            },
+        );
         let mut listener = new_test_swarm(Config::with_tokio_executor());
 
         let listener_peer_id = *listener.local_peer_id();
@@ -2322,10 +2400,22 @@ mod tests {
         dialer
             .dial(
                 DialOpts::peer_id(listener_peer_id)
-                    .addresses(vec![listener_address])
-                    .build(),
+                    .addresses(vec![listener_address.clone()])
+                    .build()
+                    .with_source("first"),
             )
             .unwrap();
+
+        let rejected = dialer.dial(
+            DialOpts::peer_id(listener_peer_id)
+                .addresses(vec![listener_address.clone()])
+                .build()
+                .with_source("second"),
+        );
+        assert!(matches!(
+            rejected,
+            Err(DialError::DialPeerConditionFalse(_))
+        ));
 
         dialer
             .disconnect_peer_id(listener_peer_id)
@@ -2338,6 +2428,42 @@ mod tests {
             } => {}
             e => panic!("Unexpected swarm event {e:?}."),
         }
+        assert!(dialer.dial_observer.as_ref().unwrap().pending.is_empty());
+
+        dialer
+            .dial(
+                DialOpts::peer_id(listener_peer_id)
+                    .addresses(vec![listener_address])
+                    .build()
+                    .with_source("retry"),
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    event = dialer.select_next_some() => {
+                        if matches!(event, SwarmEvent::ConnectionEstablished { .. }) {
+                            break;
+                        }
+                    }
+                    _ = listener.select_next_some() => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(dialer.dial_observer.as_ref().unwrap().pending.is_empty());
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                ("first", "started"),
+                ("second", "busy"),
+                ("first", "aborted"),
+                ("retry", "started"),
+                ("retry", "established"),
+            ]
+        );
     }
 
     #[test]

@@ -135,7 +135,8 @@ impl NetworkBehaviour for Behaviour {
             return Poll::Ready(ToSwarm::Dial {
                 opts: DialOpts::peer_id(peer)
                     .condition(PeerCondition::DisconnectedAndNotDialing)
-                    .build(),
+                    .build()
+                    .with_source("direct_stream"),
             });
         }
 

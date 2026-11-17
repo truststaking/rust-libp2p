@@ -1318,7 +1318,9 @@ where
             // Connect to peer
             tracing::debug!(peer=%peer_id, "Connecting to explicit peer");
             self.events.push_back(ToSwarm::Dial {
-                opts: DialOpts::peer_id(*peer_id).build(),
+                opts: DialOpts::peer_id(*peer_id)
+                    .build()
+                    .with_source("gossipsub_explicit"),
             });
         }
     }
@@ -1812,7 +1814,9 @@ where
 
                 // dial peer
                 self.events.push_back(ToSwarm::Dial {
-                    opts: DialOpts::peer_id(peer_id).build(),
+                    opts: DialOpts::peer_id(peer_id)
+                        .build()
+                        .with_source("gossipsub_peer_exchange"),
                 });
             }
         }

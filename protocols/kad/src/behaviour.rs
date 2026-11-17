@@ -638,7 +638,9 @@ where
                     }
                     kbucket::InsertResult::Pending { disconnected } => {
                         self.queued_events.push_back(ToSwarm::Dial {
-                            opts: DialOpts::peer_id(disconnected.into_preimage()).build(),
+                            opts: DialOpts::peer_id(disconnected.into_preimage())
+                                .build()
+                                .with_source("kad_routing_table"),
                         });
                         RoutingUpdate::Pending
                     }
@@ -1423,7 +1425,8 @@ where
                                 if !self.connected_peers.contains(disconnected.preimage()) {
                                     self.queued_events.push_back(ToSwarm::Dial {
                                         opts: DialOpts::peer_id(disconnected.into_preimage())
-                                            .build(),
+                                            .build()
+                                            .with_source("kad_routing_table"),
                                     })
                                 }
                             }
@@ -2660,8 +2663,13 @@ where
                             });
                         } else if &peer_id != self.kbuckets.local_key().preimage() {
                             query.pending_rpcs.push((peer_id, event));
+                            let source = match &query.info {
+                                QueryInfo::Bootstrap { .. } => "kad_bootstrap",
+                                QueryInfo::GetClosestPeers { .. } => "kad_lookup",
+                                _ => "kad_other_query",
+                            };
                             self.queued_events.push_back(ToSwarm::Dial {
-                                opts: DialOpts::peer_id(peer_id).build(),
+                                opts: DialOpts::peer_id(peer_id).build().with_source(source),
                             });
                         }
                     }

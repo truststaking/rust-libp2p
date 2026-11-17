@@ -73,6 +73,7 @@ pub struct DialOpts {
     dial_concurrency_factor_override: Option<NonZeroU8>,
     connection_id: ConnectionId,
     port_use: PortUse,
+    pub(crate) source: &'static str,
 }
 
 impl DialOpts {
@@ -133,6 +134,12 @@ impl DialOpts {
     /// [`ConnectionEstablished`](crate::behaviour::ConnectionEstablished).
     pub fn connection_id(&self) -> ConnectionId {
         self.connection_id
+    }
+
+    /// Set a static, low-cardinality source label for the swarm dial observer.
+    pub fn with_source(mut self, source: &'static str) -> Self {
+        self.source = source;
+        self
     }
 
     pub(crate) fn get_addresses(&self) -> Vec<Multiaddr> {
@@ -222,6 +229,7 @@ impl WithPeerId {
             dial_concurrency_factor_override: self.dial_concurrency_factor_override,
             connection_id: ConnectionId::next(),
             port_use: self.port_use,
+            source: "other",
         }
     }
 }
@@ -272,6 +280,7 @@ impl WithPeerIdWithAddresses {
             dial_concurrency_factor_override: self.dial_concurrency_factor_override,
             connection_id: ConnectionId::next(),
             port_use: self.port_use,
+            source: "other",
         }
     }
 }
@@ -312,6 +321,7 @@ impl WithoutPeerIdWithAddress {
             dial_concurrency_factor_override: None,
             connection_id: ConnectionId::next(),
             port_use: self.port_use,
+            source: "other",
         }
     }
 }

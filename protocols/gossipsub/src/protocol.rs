@@ -39,7 +39,7 @@ use crate::{
     topic::TopicHash,
     types::{
         ControlAction, Extensions, Graft, IDontWant, IHave, IWant, MessageId, PeerInfo, PeerKind,
-        Prune, RawMessage, RpcIn, Subscription, SubscriptionAction, SubscriptionOpts,
+        Prune, RawMessage, RpcIn, Subscription, SubscriptionAction, SubscriptionOpts, WireRpc,
     },
 };
 
@@ -183,7 +183,7 @@ pub struct GossipsubCodec {
     /// Determines the level of validation performed on incoming messages.
     validation_mode: ValidationMode,
     /// The codec to handle common encoding/decoding of protobuf messages
-    codec: quick_protobuf_codec::Codec<proto::RPC>,
+    codec: quick_protobuf_codec::Codec<WireRpc, proto::RPC>,
     /// Maximum transmit sizes per topic, with a default if not specified.
     max_transmit_sizes: HashMap<TopicHash, usize>,
 }
@@ -210,7 +210,7 @@ impl GossipsubCodec {
     /// Verifies a gossipsub message. This returns either a success or failure. All errors
     /// are logged, which prevents error handling in the codec and handler. We simply drop invalid
     /// messages and log warnings, rather than propagating errors through the codec.
-    fn verify_signature(message: &proto::Message) -> bool {
+    fn verify_signature(message: &mut proto::Message) -> bool {
         use quick_protobuf::MessageWrite;
 
         let Some(from) = message.from.as_ref() else {
@@ -223,10 +223,10 @@ impl GossipsubCodec {
             return false;
         };
 
-        let Some(signature) = message.signature.as_ref() else {
+        if message.signature.is_none() {
             tracing::debug!("Signature verification failed: No signature provided");
             return false;
-        };
+        }
 
         // If there is a key value in the protobuf, use that key otherwise the key must be
         // obtained from the inlined source peer_id.
@@ -249,23 +249,23 @@ impl GossipsubCodec {
             return false;
         }
 
-        // Construct the signature bytes
-        let mut message_sig = message.clone();
-        message_sig.signature = None;
-        message_sig.key = None;
-        let mut buf = Vec::with_capacity(message_sig.get_size());
-        let mut writer = Writer::new(&mut buf);
-        message_sig
-            .write_message(&mut writer)
+        // The signing preimage omits the signature and key. Restore both before forwarding.
+        let signature = message.signature.take().expect("signature checked above");
+        let key = message.key.take();
+        let mut signature_bytes = Vec::with_capacity(SIGNING_PREFIX.len() + message.get_size());
+        signature_bytes.extend_from_slice(SIGNING_PREFIX);
+        message
+            .write_message(&mut Writer::new(&mut signature_bytes))
             .expect("Encoding to succeed");
-        let mut signature_bytes = SIGNING_PREFIX.to_vec();
-        signature_bytes.extend_from_slice(&buf);
-        public_key.verify(&signature_bytes, signature)
+        let valid = public_key.verify(&signature_bytes, &signature);
+        message.signature = Some(signature);
+        message.key = key;
+        valid
     }
 }
 
 impl Encoder for GossipsubCodec {
-    type Item<'a> = proto::RPC;
+    type Item<'a> = WireRpc;
     type Error = quick_protobuf_codec::Error;
 
     fn encode(&mut self, item: Self::Item<'_>, dst: &mut BytesMut) -> Result<(), Self::Error> {
@@ -286,7 +286,7 @@ impl Decoder for GossipsubCodec {
         // Store any invalid messages.
         let mut invalid_messages = Vec::new();
 
-        for message in rpc.publish.into_iter() {
+        for mut message in rpc.publish {
             let topic = TopicHash::from_raw(&message.topic);
 
             // Check the message size to ensure it doesn't bypass the configured max.
@@ -372,7 +372,7 @@ impl Decoder for GossipsubCodec {
             }
 
             // verify message signatures if required
-            if verify_signature && !GossipsubCodec::verify_signature(&message) {
+            if verify_signature && !GossipsubCodec::verify_signature(&mut message) {
                 tracing::warn!("Invalid signature for received message");
                 // Build the invalid message (ignoring further validation of sequence number
                 // and source)
@@ -699,7 +699,7 @@ mod tests {
             let message = message.0;
 
             let rpc = RpcOut::Publish {
-                message: message.clone(),
+                message: message.clone().into(),
                 timeout: Delay::new(Duration::from_secs(1)),
                 message_id: MessageId(vec![0, 0]),
             };
@@ -707,7 +707,16 @@ mod tests {
             let mut codec =
                 GossipsubCodec::new(u32::MAX as usize, ValidationMode::Strict, HashMap::new());
             let mut buf = BytesMut::new();
-            codec.encode(rpc.into_protobuf(), &mut buf).unwrap();
+            codec.encode(rpc.into(), &mut buf).unwrap();
+            let protobuf = proto::RPC {
+                publish: vec![message.clone().into()],
+                ..Default::default()
+            };
+            let mut canonical = BytesMut::new();
+            quick_protobuf_codec::Codec::<proto::RPC>::new(usize::MAX)
+                .encode(protobuf, &mut canonical)
+                .unwrap();
+            assert_eq!(buf, canonical);
             let decoded_rpc = codec.decode(&mut buf).unwrap().unwrap();
             // mark as validated as its a published message
             match decoded_rpc {
@@ -721,6 +730,28 @@ mod tests {
         }
 
         QuickCheck::new().quickcheck(prop as fn(_) -> _)
+    }
+
+    #[test]
+    fn signature_verification_preserves_wire_fields() {
+        let keypair = Keypair::generate_ed25519();
+        let public_key = keypair.public().encode_protobuf();
+        let mut behaviour: Behaviour =
+            Behaviour::new(MessageAuthenticity::Signed(keypair), Config::default()).unwrap();
+        let raw = behaviour
+            .build_raw_message(Topic::new("test").hash(), vec![1])
+            .unwrap();
+        let mut message: proto::Message = raw.into();
+        message.key = Some(public_key);
+        let original = message.clone();
+
+        assert!(GossipsubCodec::verify_signature(&mut message));
+        assert_eq!(message, original);
+
+        message.data = Some(vec![2]);
+        let tampered = message.clone();
+        assert!(!GossipsubCodec::verify_signature(&mut message));
+        assert_eq!(message, tampered);
     }
 
     #[test]

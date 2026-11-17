@@ -380,7 +380,9 @@ fn test_iwant_msg_from_peer_below_gossip_threshold_gets_ignored() {
             .iter()
             .map(|(peer_id, msg)| (
                 peer_id,
-                gs.data_transform.inbound_transform(msg.clone()).unwrap()
+                gs.data_transform
+                    .inbound_transform(msg.as_ref().clone())
+                    .unwrap()
             ))
             .any(|(peer_id, msg)| peer_id == &p2 && gs.config.message_id(&msg) == msg_id)
     );
@@ -390,7 +392,9 @@ fn test_iwant_msg_from_peer_below_gossip_threshold_gets_ignored() {
             .iter()
             .map(|(peer_id, msg)| (
                 peer_id,
-                gs.data_transform.inbound_transform(msg.clone()).unwrap()
+                gs.data_transform
+                    .inbound_transform(msg.as_ref().clone())
+                    .unwrap()
             ))
             .all(|(peer_id, msg)| !(peer_id == &p1 && gs.config.message_id(&msg) == msg_id))
     );

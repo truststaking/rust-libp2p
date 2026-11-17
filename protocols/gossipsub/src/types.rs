@@ -22,13 +22,14 @@
 use std::{
     collections::BTreeSet,
     fmt::{self, Debug},
+    sync::Arc,
 };
 
 use futures_timer::Delay;
 use hashlink::LinkedHashMap;
 use libp2p_identity::PeerId;
 use libp2p_swarm::ConnectionId;
-use quick_protobuf::MessageWrite;
+use quick_protobuf::{MessageWrite, Writer, WriterBackend, sizeofs::sizeof_len};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use web_time::Instant;
@@ -178,15 +179,45 @@ impl PeerKind {
 impl RawMessage {
     /// Calculates the encoded length of this message (used for calculating metrics).
     pub fn raw_protobuf_len(&self) -> usize {
-        let message = proto::Message {
-            from: self.source.map(|m| m.to_bytes()),
-            data: Some(self.data.clone()),
-            seqno: self.sequence_number.map(|s| s.to_be_bytes().to_vec()),
-            topic: TopicHash::into_string(self.topic.clone()),
-            signature: self.signature.clone(),
-            key: self.key.clone(),
-        };
-        message.get_size()
+        self.get_size()
+    }
+}
+
+impl MessageWrite for RawMessage {
+    fn get_size(&self) -> usize {
+        let field = |len| 1 + sizeof_len(len);
+        self.source
+            .as_ref()
+            .map_or(0, |peer| field(peer.as_ref().encoded_len()))
+            + field(self.data.len())
+            + self.sequence_number.map_or(0, |_| field(8))
+            + field(self.topic.as_str().len())
+            + self
+                .signature
+                .as_ref()
+                .map_or(0, |bytes| field(bytes.len()))
+            + self.key.as_ref().map_or(0, |bytes| field(bytes.len()))
+    }
+
+    fn write_message<W: WriterBackend>(
+        &self,
+        writer: &mut Writer<W>,
+    ) -> quick_protobuf::Result<()> {
+        if let Some(source) = self.source {
+            writer.write_with_tag(10, |w| w.write_bytes(&source.to_bytes()))?;
+        }
+        writer.write_with_tag(18, |w| w.write_bytes(&self.data))?;
+        if let Some(sequence) = self.sequence_number {
+            writer.write_with_tag(26, |w| w.write_bytes(&sequence.to_be_bytes()))?;
+        }
+        writer.write_with_tag(34, |w| w.write_string(self.topic.as_str()))?;
+        if let Some(signature) = &self.signature {
+            writer.write_with_tag(42, |w| w.write_bytes(signature))?;
+        }
+        if let Some(key) = &self.key {
+            writer.write_with_tag(50, |w| w.write_bytes(key))?;
+        }
+        Ok(())
     }
 }
 
@@ -342,14 +373,14 @@ pub enum RpcOut {
     /// can wait to be sent before it is abandoned.
     Publish {
         message_id: MessageId,
-        message: RawMessage,
+        message: Arc<RawMessage>,
         timeout: Delay,
     },
     /// Forward a Gossipsub message on network. `timeout` limits the duration the message
     /// can wait to be sent before it is abandoned.
     Forward {
         message_id: MessageId,
-        message: RawMessage,
+        message: Arc<RawMessage>,
         timeout: Delay,
     },
     /// Subscribe a topic.
@@ -381,10 +412,15 @@ pub enum RpcOut {
 }
 
 impl RpcOut {
-    /// Converts the GossipsubRPC into its protobuf format.
-    // A convenience function to avoid explicitly specifying types.
+    #[cfg(test)]
     pub fn into_protobuf(self) -> proto::RPC {
-        self.into()
+        match WireRpc::from(self) {
+            WireRpc::Publish(message) => proto::RPC {
+                publish: vec![message.as_ref().clone().into()],
+                ..Default::default()
+            },
+            WireRpc::Control(rpc) => rpc,
+        }
     }
 
     /// Returns true if the `RpcOut` is priority.
@@ -400,22 +436,38 @@ impl RpcOut {
     }
 }
 
-impl From<RpcOut> for proto::RPC {
-    /// Converts the RPC into protobuf format.
+pub enum WireRpc {
+    Publish(Arc<RawMessage>),
+    Control(proto::RPC),
+}
+
+impl MessageWrite for WireRpc {
+    fn get_size(&self) -> usize {
+        match self {
+            Self::Publish(message) => 1 + sizeof_len(message.get_size()),
+            Self::Control(rpc) => rpc.get_size(),
+        }
+    }
+
+    fn write_message<W: WriterBackend>(
+        &self,
+        writer: &mut Writer<W>,
+    ) -> quick_protobuf::Result<()> {
+        match self {
+            Self::Publish(message) => {
+                writer.write_with_tag(18, |w| w.write_message(message.as_ref()))
+            }
+            Self::Control(rpc) => rpc.write_message(writer),
+        }
+    }
+}
+
+impl From<RpcOut> for WireRpc {
     fn from(rpc: RpcOut) -> Self {
-        match rpc {
-            RpcOut::Publish { message, .. } => proto::RPC {
-                subscriptions: Vec::new(),
-                publish: vec![message.into()],
-                control: None,
-                partial: None,
-            },
-            RpcOut::Forward { message, .. } => proto::RPC {
-                publish: vec![message.into()],
-                subscriptions: Vec::new(),
-                control: None,
-                partial: None,
-            },
+        Self::Control(match rpc {
+            RpcOut::Publish { message, .. } | RpcOut::Forward { message, .. } => {
+                return Self::Publish(message);
+            }
             RpcOut::Subscribe {
                 topic,
                 requests_partial,
@@ -574,7 +626,7 @@ impl From<RpcOut> for proto::RPC {
                     partsMetadata: metadata,
                 }),
             },
-        }
+        })
     }
 }
 

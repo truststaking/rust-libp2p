@@ -26,6 +26,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fmt::{self, Debug},
     net::IpAddr,
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -663,7 +664,7 @@ where
             return Err(PublishError::MessageTooLarge);
         }
 
-        let raw_message = self.build_raw_message(topic, transformed_data)?;
+        let raw_message = Arc::new(self.build_raw_message(topic, transformed_data)?);
 
         // calculate the message id from the un-transformed data
         let msg_id = self.config.message_id(&Message {
@@ -716,14 +717,14 @@ where
         self.gossip_promises.message_delivered(&msg_id);
 
         // Send to peers we know are subscribed to the topic.
+        let send_idontwant = self.config.idontwant_on_publish()
+            && raw_message.raw_protobuf_len() > self.config.idontwant_message_size_threshold();
         let mut publish_failed = true;
         for peer_id in recipients.iter() {
             tracing::trace!(peer=%peer_id, "Sending message to peer");
             // If enabled, Send first an IDONTWANT so that if we are slower than forwarders
             // publishing the original message we don't receive it back.
-            if raw_message.raw_protobuf_len() > self.config.idontwant_message_size_threshold()
-                && self.config.idontwant_on_publish()
-            {
+            if send_idontwant {
                 self.send_message(
                     *peer_id,
                     RpcOut::IDontWant(IDontWant {
@@ -1997,7 +1998,8 @@ where
             peer_score.validate_message(propagation_source, &msg_id, &message.topic);
         }
 
-        // Add the message to our memcache
+        // Share one raw message across history and forwarding queues.
+        let raw_message = Arc::new(raw_message);
         self.mcache.put(&msg_id, raw_message.clone());
 
         // Dispatch the message to the user if we are subscribed to any of the topics
@@ -2936,7 +2938,7 @@ where
     fn forward_msg(
         &mut self,
         msg_id: &MessageId,
-        message: RawMessage,
+        message: Arc<RawMessage>,
         propagation_source: Option<&PeerId>,
         originating_peers: HashSet<PeerId>,
     ) -> bool {

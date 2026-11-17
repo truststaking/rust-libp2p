@@ -22,6 +22,7 @@ use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     fmt,
     fmt::Debug,
+    sync::Arc,
 };
 
 use libp2p_identity::PeerId;
@@ -41,7 +42,7 @@ pub(crate) struct CacheEntry {
 /// MessageCache struct holding history of messages.
 #[derive(Clone)]
 pub(crate) struct MessageCache {
-    msgs: HashMap<MessageId, (RawMessage, HashSet<PeerId>)>,
+    msgs: HashMap<MessageId, (Arc<RawMessage>, HashSet<PeerId>)>,
     /// For every message and peer the number of times this peer asked for the message
     iwant_counts: HashMap<MessageId, HashMap<PeerId, u32>>,
     history: Vec<Vec<CacheEntry>>,
@@ -75,7 +76,7 @@ impl MessageCache {
     /// Put a message into the memory cache.
     ///
     /// Returns true if the message didn't already exist in the cache.
-    pub(crate) fn put(&mut self, message_id: &MessageId, msg: RawMessage) -> bool {
+    pub(crate) fn put(&mut self, message_id: &MessageId, msg: impl Into<Arc<RawMessage>>) -> bool {
         if self.history.is_empty() {
             return true;
         }
@@ -85,6 +86,7 @@ impl MessageCache {
                 false
             }
             Entry::Vacant(entry) => {
+                let msg = msg.into();
                 let cache_entry = CacheEntry {
                     mid: message_id.clone(),
                     topic: msg.topic.clone(),
@@ -114,7 +116,9 @@ impl MessageCache {
     /// Get a message with `message_id`
     #[cfg(test)]
     pub(crate) fn get(&self, message_id: &MessageId) -> Option<&RawMessage> {
-        self.msgs.get(message_id).map(|(message, _)| message)
+        self.msgs
+            .get(message_id)
+            .map(|(message, _)| message.as_ref())
     }
 
     /// Increases the iwant count for the given message by one and returns the message together
@@ -123,7 +127,7 @@ impl MessageCache {
         &mut self,
         message_id: &MessageId,
         peer: &PeerId,
-    ) -> Option<(&RawMessage, u32)> {
+    ) -> Option<(&Arc<RawMessage>, u32)> {
         let iwant_counts = &mut self.iwant_counts;
         self.msgs.get(message_id).and_then(|(message, _)| {
             if !message.validated {
@@ -148,9 +152,11 @@ impl MessageCache {
     pub(crate) fn validate(
         &mut self,
         message_id: &MessageId,
-    ) -> Option<(&RawMessage, HashSet<PeerId>)> {
+    ) -> Option<(&Arc<RawMessage>, HashSet<PeerId>)> {
         self.msgs.get_mut(message_id).map(|(message, known_peers)| {
-            message.validated = true;
+            if !message.validated {
+                Arc::make_mut(message).validated = true;
+            }
             // Clear the known peers list (after a message is validated, it is forwarded and we no
             // longer need to store the originating peers).
             let originating_peers = std::mem::take(known_peers);
@@ -219,7 +225,7 @@ impl MessageCache {
     pub(crate) fn remove(
         &mut self,
         message_id: &MessageId,
-    ) -> Option<(RawMessage, HashSet<PeerId>)> {
+    ) -> Option<(Arc<RawMessage>, HashSet<PeerId>)> {
         // We only remove the message from msgs and iwant_count and keep the message_id in the
         // history vector. Zhe id in the history vector will simply be ignored on popping.
 

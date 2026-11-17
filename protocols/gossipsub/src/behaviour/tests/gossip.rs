@@ -82,7 +82,10 @@ fn test_handle_iwant_msg_cached() {
     assert!(
         sent_messages
             .iter()
-            .map(|msg| gs.data_transform.inbound_transform(msg.clone()).unwrap())
+            .map(|msg| gs
+                .data_transform
+                .inbound_transform(msg.as_ref().clone())
+                .unwrap())
             .any(|msg| gs.config.message_id(&msg) == msg_id),
         "Expected the cached message to be sent to an IWANT peer"
     );
@@ -132,7 +135,7 @@ fn test_handle_iwant_msg_cached_shifted() {
                     if matches!(queue.try_pop(), Some(RpcOut::Forward{message, ..}) if
                         gs.config.message_id(
                             &gs.data_transform
-                                .inbound_transform(message.clone())
+                                .inbound_transform(message.as_ref().clone())
                                 .unwrap(),
                         ) == msg_id)
                     {

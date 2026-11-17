@@ -88,6 +88,7 @@ fn test_publish_without_flood_publishing() {
             publishes
                 .first()
                 .expect("Should contain > 0 entries")
+                .as_ref()
                 .clone(),
         )
         .unwrap();
@@ -172,6 +173,7 @@ fn test_fanout() {
             publishes
                 .first()
                 .expect("Should contain > 0 entries")
+                .as_ref()
                 .clone(),
         )
         .unwrap();
@@ -225,6 +227,7 @@ fn test_flood_publish() {
             publishes
                 .first()
                 .expect("Should contain > 0 entries")
+                .as_ref()
                 .clone(),
         )
         .unwrap();

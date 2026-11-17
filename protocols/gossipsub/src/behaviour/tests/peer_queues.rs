@@ -397,6 +397,7 @@ fn test_slow_peer_returns_failed_forward() {
         topic: raw_message.topic.clone(),
     });
 
+    let raw_message = std::sync::Arc::new(raw_message);
     gs.forward_msg(&msg_id, raw_message.clone(), None, HashSet::new());
     gs.forward_msg(&msg_id, raw_message, None, HashSet::new());
 

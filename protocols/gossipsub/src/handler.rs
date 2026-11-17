@@ -39,8 +39,7 @@ use crate::{
     ValidationError,
     protocol::{GossipsubCodec, ProtocolConfig},
     queue::Queue,
-    rpc_proto::proto,
-    types::{PeerKind, RawMessage, RpcIn, RpcOut},
+    types::{PeerKind, RawMessage, RpcIn, RpcOut, WireRpc},
 };
 
 /// The event emitted by the Handler. This informs the behaviour of various events created
@@ -156,7 +155,7 @@ enum OutboundSubstreamState {
     /// Waiting for the user to send a message. The idle state for an outbound substream.
     WaitingOutput(Framed<Stream, GossipsubCodec>),
     /// Waiting to send a message to the remote.
-    PendingSend(Framed<Stream, GossipsubCodec>, Box<proto::RPC>),
+    PendingSend(Framed<Stream, GossipsubCodec>, Box<WireRpc>),
     /// Waiting to flush the substream so that the data arrives to the remote.
     PendingFlush(Framed<Stream, GossipsubCodec>),
     /// An error occurred during processing.
@@ -288,7 +287,7 @@ impl EnabledHandler {
                         }
                         self.outbound_substream = Some(OutboundSubstreamState::PendingSend(
                             substream,
-                            Box::new(message.into_protobuf()),
+                            Box::new(message.into()),
                         ));
                         continue;
                     }

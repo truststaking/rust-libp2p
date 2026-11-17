@@ -35,7 +35,7 @@ use crate::{
     protocol::GossipsubCodec,
     rpc_proto::proto,
     topic::TopicHash,
-    types::{RawMessage, RpcIn, RpcOut},
+    types::{RawMessage, RpcIn, RpcOut, WireRpc},
 };
 
 /// Test that specific topic configurations are correctly applied
@@ -684,7 +684,7 @@ fn test_validation_error_message_size_too_large_topic_specific() {
         control: None,
         partial: None,
     };
-    codec.encode(rpc, &mut buf).unwrap();
+    codec.encode(WireRpc::Control(rpc), &mut buf).unwrap();
 
     let decoded = codec.decode(&mut buf).unwrap().unwrap();
     match decoded {
@@ -791,7 +791,7 @@ fn test_validation_message_size_within_topic_specific() {
         control: None,
         partial: None,
     };
-    codec.encode(rpc, &mut buf).unwrap();
+    codec.encode(WireRpc::Control(rpc), &mut buf).unwrap();
 
     let decoded = codec.decode(&mut buf).unwrap().unwrap();
     match decoded {

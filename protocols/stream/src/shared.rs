@@ -32,6 +32,31 @@ pub(crate) struct Shared {
     dial_sender: mpsc::Sender<PeerId>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_close_releases_sender() {
+        let (dial_sender, _dial_receiver) = mpsc::channel(0);
+        let mut shared = Shared::new(dial_sender);
+        let peer = PeerId::random();
+        let closed = ConnectionId::new_unchecked(1);
+        let live = ConnectionId::new_unchecked(2);
+        let _closed_receiver = shared.receiver(peer, closed);
+        let _live_receiver = shared.receiver(peer, live);
+        shared.on_connection_established(closed, peer);
+        shared.on_connection_established(live, peer);
+
+        shared.on_connection_closed(closed);
+
+        assert!(!shared.connections.contains_key(&closed));
+        assert!(!shared.senders.contains_key(&closed));
+        assert!(shared.connections.contains_key(&live));
+        assert!(shared.senders.contains_key(&live));
+    }
+}
+
 impl Shared {
     pub(crate) fn lock(shared: &Arc<Mutex<Shared>>) -> MutexGuard<'_, Shared> {
         shared.lock().unwrap_or_else(|e| e.into_inner())
@@ -105,6 +130,7 @@ impl Shared {
 
     pub(crate) fn on_connection_closed(&mut self, conn: ConnectionId) {
         self.connections.remove(&conn);
+        self.senders.remove(&conn);
     }
 
     pub(crate) fn on_dial_failure(&mut self, peer: PeerId, reason: String) {

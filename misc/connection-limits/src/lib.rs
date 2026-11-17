@@ -19,7 +19,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     convert::Infallible,
     fmt,
     task::{Context, Poll},
@@ -350,10 +350,12 @@ impl NetworkBehaviour for Behaviour {
             }) => {
                 self.established_inbound_connections.remove(&connection_id);
                 self.established_outbound_connections.remove(&connection_id);
-                self.established_per_peer
-                    .entry(peer_id)
-                    .or_default()
-                    .remove(&connection_id);
+                if let Entry::Occupied(mut entry) = self.established_per_peer.entry(peer_id) {
+                    entry.get_mut().remove(&connection_id);
+                    if entry.get().is_empty() {
+                        entry.remove();
+                    }
+                }
             }
             FromSwarm::ConnectionEstablished(ConnectionEstablished {
                 peer_id,
@@ -411,6 +413,40 @@ mod tests {
     use tokio::runtime::Runtime;
 
     use super::*;
+
+    #[test]
+    fn closing_last_connection_removes_peer_entry() {
+        let mut limits = super::Behaviour::new(ConnectionLimits::default());
+        let peer_id = PeerId::random();
+        let endpoint = ConnectedPoint::Listener {
+            local_addr: "/memory/1".parse().unwrap(),
+            send_back_addr: "/memory/2".parse().unwrap(),
+        };
+        let first = ConnectionId::new_unchecked(1);
+        let last = ConnectionId::new_unchecked(2);
+        for (other_established, connection_id) in [first, last].into_iter().enumerate() {
+            limits.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+                peer_id,
+                connection_id,
+                endpoint: &endpoint,
+                failed_addresses: &[],
+                other_established,
+            }));
+        }
+        for (remaining_established, connection_id) in [(1, first), (0, last)] {
+            limits.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+                peer_id,
+                connection_id,
+                endpoint: &endpoint,
+                cause: None,
+                remaining_established,
+            }));
+            assert_eq!(
+                limits.established_per_peer.get(&peer_id),
+                (remaining_established == 1).then_some(&HashSet::from([last]))
+            );
+        }
+    }
 
     fn fill_outgoing() -> (Swarm<Behaviour>, Multiaddr, u32) {
         use rand::Rng;

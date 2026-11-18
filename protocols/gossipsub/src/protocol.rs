@@ -228,6 +228,15 @@ impl GossipsubCodec {
             return false;
         }
 
+        #[cfg(feature = "verification-cache")]
+        let fingerprint = {
+            let fingerprint = crate::verification_cache::fingerprint(message);
+            if crate::verification_cache::contains(&fingerprint) {
+                return true;
+            }
+            fingerprint
+        };
+
         // If there is a key value in the protobuf, use that key otherwise the key must be
         // obtained from the inlined source peer_id.
         let public_key = match message.key.as_deref().map(PublicKey::try_decode_protobuf) {
@@ -257,6 +266,8 @@ impl GossipsubCodec {
         message
             .write_message(&mut Writer::new(&mut signature_bytes))
             .expect("Encoding to succeed");
+        #[cfg(feature = "verification-cache")]
+        let cacheable = public_key.key_type() == libp2p_identity::KeyType::Secp256k1;
         #[cfg(feature = "native-secp256k1")]
         let valid = crate::native_verification::verify(
             public_key,
@@ -269,6 +280,11 @@ impl GossipsubCodec {
         let valid = public_key.verify(&signature_bytes, &signature);
         message.signature = Some(signature);
         message.key = key;
+
+        #[cfg(feature = "verification-cache")]
+        if valid && cacheable {
+            crate::verification_cache::insert(fingerprint);
+        }
         valid
     }
 }
@@ -766,6 +782,63 @@ mod tests {
         let tampered = message.clone();
         assert!(!GossipsubCodec::verify_signature(&mut message));
         assert_eq!(message, tampered);
+    }
+
+    #[cfg(feature = "verification-cache")]
+    #[test]
+    fn cached_verification_binds_every_wire_field() {
+        let signer = Keypair::generate_secp256k1();
+        let key = signer.public().encode_protobuf();
+        let mut behaviour: Behaviour =
+            Behaviour::new(MessageAuthenticity::Signed(signer), Config::default()).unwrap();
+        let raw = behaviour
+            .build_raw_message(Topic::new("test").hash(), vec![1])
+            .unwrap();
+        let mut message: proto::Message = raw.into();
+        message.key = Some(key);
+        let original = message.clone();
+
+        assert!(GossipsubCodec::verify_signature(&mut message));
+        assert!(crate::verification_cache::contains(
+            &crate::verification_cache::fingerprint(&message)
+        ));
+        assert!(GossipsubCodec::verify_signature(&mut message));
+        assert_eq!(message, original);
+
+        let mutations: [fn(&mut proto::Message); 7] = [
+            |msg| msg.from = Some(other_source()),
+            |msg| msg.data = None,
+            |msg| msg.seqno.as_mut().unwrap()[0] ^= 1,
+            |msg| msg.topic.push('x'),
+            |msg| msg.signature.as_mut().unwrap().push(0),
+            |msg| msg.signature = None,
+            |msg| msg.key = Some(other_key()),
+        ];
+        for mutate in mutations {
+            let mut tampered = original.clone();
+            mutate(&mut tampered);
+            let fingerprint = crate::verification_cache::fingerprint(&tampered);
+            assert!(!crate::verification_cache::contains(&fingerprint));
+            assert!(!GossipsubCodec::verify_signature(&mut tampered));
+            assert!(!crate::verification_cache::contains(&fingerprint));
+        }
+
+        fn other_source() -> Vec<u8> {
+            Keypair::generate_secp256k1()
+                .public()
+                .to_peer_id()
+                .to_bytes()
+        }
+        fn other_key() -> Vec<u8> {
+            Keypair::generate_secp256k1().public().encode_protobuf()
+        }
+
+        message.key = None;
+        assert!(!crate::verification_cache::contains(
+            &crate::verification_cache::fingerprint(&message)
+        ));
+        assert!(GossipsubCodec::verify_signature(&mut message));
+        assert!(message.key.is_none());
     }
 
     #[test]

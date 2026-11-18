@@ -115,6 +115,8 @@ mod time_cache;
 mod topic;
 mod transform;
 mod types;
+#[cfg(feature = "verification-cache")]
+mod verification_cache;
 #[cfg(feature = "verification-sample")]
 mod verification_sample;
 

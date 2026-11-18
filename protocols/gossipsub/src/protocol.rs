@@ -257,6 +257,15 @@ impl GossipsubCodec {
         message
             .write_message(&mut Writer::new(&mut signature_bytes))
             .expect("Encoding to succeed");
+        #[cfg(feature = "native-secp256k1")]
+        let valid = crate::native_verification::verify(
+            public_key,
+            &signature_bytes,
+            &signature,
+            #[cfg(feature = "verification-sample")]
+            &source,
+        );
+        #[cfg(not(feature = "native-secp256k1"))]
         let valid = public_key.verify(&signature_bytes, &signature);
         message.signature = Some(signature);
         message.key = key;
@@ -734,7 +743,12 @@ mod tests {
 
     #[test]
     fn signature_verification_preserves_wire_fields() {
-        let keypair = Keypair::generate_ed25519();
+        check_signature_wire_fields(Keypair::generate_ed25519());
+        #[cfg(feature = "native-secp256k1")]
+        check_signature_wire_fields(Keypair::generate_secp256k1());
+    }
+
+    fn check_signature_wire_fields(keypair: Keypair) {
         let public_key = keypair.public().encode_protobuf();
         let mut behaviour: Behaviour =
             Behaviour::new(MessageAuthenticity::Signed(keypair), Config::default()).unwrap();

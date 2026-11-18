@@ -14,6 +14,8 @@ categories = ["network-programming", "asynchronous"]
 wasm-bindgen = ["getrandom/js", "futures-timer/wasm-bindgen"]
 metrics = ["prometheus-client"]
 partial_messages = []
+native-secp256k1 = ["dep:k256", "dep:secp256k1", "libp2p-identity/secp256k1"]
+verification-sample = ["native-secp256k1", "dep:metrics"]
 
 [dependencies]
 async-channel = "2.5.0"
@@ -28,14 +30,17 @@ futures-timer = "3.0.2"
 getrandom = { workspace = true }
 hashlink = { workspace = true }
 hex_fmt = "0.3.0"
+k256 = { version = "0.13.4", optional = true, default-features = false, features = ["ecdsa"] }
 web-time = { workspace = true }
 libp2p-core = { workspace = true }
 libp2p-identity = { workspace = true, features = ["rand"] }
 libp2p-swarm = { workspace = true }
+metrics = { version = "0.24", optional = true }
 quick-protobuf = "0.8"
 quick-protobuf-codec = { workspace = true }
 rand = "0.8"
 regex = "1.12.3"
+secp256k1 = { version = "0.30.0", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 sha2 = "0.10.8"
 tracing = { workspace = true }

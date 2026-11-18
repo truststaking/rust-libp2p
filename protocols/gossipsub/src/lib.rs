@@ -104,6 +104,8 @@ mod handler;
 mod mcache;
 #[cfg(feature = "metrics")]
 mod metrics;
+#[cfg(feature = "native-secp256k1")]
+mod native_verification;
 mod peer_score;
 mod protocol;
 mod queue;
@@ -113,6 +115,8 @@ mod time_cache;
 mod topic;
 mod transform;
 mod types;
+#[cfg(feature = "verification-sample")]
+mod verification_sample;
 
 #[cfg(feature = "metrics")]
 pub use metrics::Config as MetricsConfig;
